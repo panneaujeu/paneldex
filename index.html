@@ -20,23 +20,19 @@
     <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-50 flex justify-between items-center">
         <h1 class="text-xl font-bold"><i class="fa-solid fa-traffic-light mr-2"></i>Paneldex</h1>
         <div class="text-right">
-            <p class="text-sm opacity-80">Score total</p>
+            <p class="text-sm opacity-80 cursor-pointer hover:underline" id="playerNameDisplay" onclick="promptName()">Joueur <i class="fa-solid fa-pen text-xs ml-1"></i></p>
             <p class="text-2xl font-bold" id="totalScore">0 <span class="text-sm">pts</span></p>
         </div>
     </header>
 
     <main class="p-4 max-w-lg mx-auto">
         
-        <!-- API Config Section -->
-        <div class="bg-white rounded-xl shadow-sm p-4 mb-6 border border-gray-200" id="apiConfigSection">
-            <div class="flex justify-between items-center cursor-pointer" onclick="toggleApiConfig()">
-                <h2 class="font-semibold text-gray-700"><i class="fa-solid fa-gear mr-2"></i>Configuration API</h2>
-                <i class="fa-solid fa-chevron-down text-gray-400" id="apiToggleIcon"></i>
-            </div>
-            <div id="apiConfigContent" class="hidden mt-4">
-                <p class="text-xs text-gray-500 mb-2">Entre ta clé Gemini API pour activer le scanner.</p>
-                <input type="password" id="apiKeyInput" placeholder="Clé API Gemini..." class="w-full p-2 border rounded mb-2 text-sm focus:outline-none focus:border-blue-500">
-                <button onclick="saveApiKey()" class="w-full bg-gray-800 text-white py-2 rounded text-sm font-semibold">Sauvegarder la clé</button>
+        <!-- Multiplayer Leaderboard Section -->
+        <div class="bg-white rounded-xl shadow-sm p-4 mb-6 border border-yellow-400 relative overflow-hidden">
+            <div class="absolute -right-4 -top-4 text-yellow-100 opacity-50 text-6xl"><i class="fa-solid fa-trophy"></i></div>
+            <h2 class="font-bold text-gray-800 mb-3 relative z-10"><i class="fa-solid fa-ranking-star text-yellow-500 mr-2"></i>Classement Général</h2>
+            <div id="leaderboardList" class="space-y-2 relative z-10 max-h-40 overflow-y-auto">
+                <p class="text-sm text-gray-500 italic">Connexion au serveur multijoueur...</p>
             </div>
         </div>
 
@@ -67,223 +63,303 @@
         <div>
             <h2 class="text-xl font-bold mb-4 text-gray-800"><i class="fa-solid fa-book-open mr-2"></i>Ton Pokédex (<span id="pokedexCount">0</span>)</h2>
             <div id="pokedexGrid" class="grid grid-cols-2 gap-3">
-                <!-- Cards injected here via JS -->
-            </div>
+            <!-- Cards injected here via JS -->
         </div>
+    </div>
 
-    </main>
+</main>
 
-    <script>
-        // State
-        let pokedex = [];
-        let score = 0;
+<script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, collection, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Init
-        window.onload = () => {
-            const savedKey = localStorage.getItem('geminiApiKey');
-            if (savedKey) {
-                document.getElementById('apiKeyInput').value = savedKey;
+    // State
+    let pokedex = [];
+    let score = 0;
+    let playerName = localStorage.getItem('paneldex_username') || "Joueur_" + Math.floor(Math.random() * 1000);
+    
+    // Firebase setup
+    const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+    const app = Object.keys(firebaseConfig).length ? initializeApp(firebaseConfig) : null;
+    const auth = app ? getAuth(app) : null;
+    const db = app ? getFirestore(app) : null;
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    let currentUser = null;
+
+    // Init
+    window.onload = () => {
+        document.getElementById('playerNameDisplay').innerText = playerName;
+
+        const savedDex = localStorage.getItem('signPokedex');
+        if (savedDex) {
+            pokedex = JSON.parse(savedDex);
+            updateScoreAndPokedex();
+        }
+
+        if (auth) {
+            initAuth();
+        }
+    };
+
+    const initAuth = async () => {
+        try {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
             } else {
-                document.getElementById('apiConfigContent').classList.remove('hidden');
+                await signInAnonymously(auth);
             }
+        } catch (e) {
+            console.error("Auth init error:", e);
+        }
+    };
 
-            const savedDex = localStorage.getItem('signPokedex');
-            if (savedDex) {
-                pokedex = JSON.parse(savedDex);
-                updateScoreAndPokedex();
+    if (auth) {
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) {
+                setupLeaderboardListener();
+                syncScore(score);
+            }
+        });
+    }
+
+    function setupLeaderboardListener() {
+        if (!currentUser || !db) return;
+        const lbRef = collection(db, 'artifacts', appId, 'public', 'data', 'leaderboard');
+        onSnapshot(lbRef, (snapshot) => {
+            let leaderboard = [];
+            snapshot.forEach(doc => {
+                leaderboard.push({ id: doc.id, ...doc.data() });
+            });
+            leaderboard.sort((a, b) => b.score - a.score);
+            renderLeaderboard(leaderboard);
+        }, (error) => {
+            console.error("Leaderboard error", error);
+        });
+    }
+
+    function renderLeaderboard(leaderboard) {
+        const list = document.getElementById('leaderboardList');
+        list.innerHTML = '';
+        if(leaderboard.length === 0) {
+            list.innerHTML = '<p class="text-sm text-gray-500 italic">Aucun joueur pour le moment.</p>';
+            return;
+        }
+
+        leaderboard.slice(0, 5).forEach((player, index) => {
+            let medal = `<span class="w-6 inline-block text-gray-400 font-bold">${index + 1}.</span>`;
+            if(index === 0) medal = `<span class="w-6 inline-block text-yellow-500"><i class="fa-solid fa-medal"></i></span>`;
+            if(index === 1) medal = `<span class="w-6 inline-block text-gray-400"><i class="fa-solid fa-medal"></i></span>`;
+            if(index === 2) medal = `<span class="w-6 inline-block text-amber-600"><i class="fa-solid fa-medal"></i></span>`;
+
+            const isMe = player.id === currentUser?.uid;
+            const itemClass = isMe ? "bg-blue-50 font-semibold" : "bg-gray-50";
+
+            list.innerHTML += `
+                <div class="flex justify-between items-center p-2 rounded ${itemClass} text-sm">
+                    <div>${medal} ${player.username} ${isMe ? '(Toi)' : ''}</div>
+                    <div class="font-bold text-blue-600">${player.score} pts</div>
+                </div>
+            `;
+        });
+    }
+
+    async function syncScore(newScore) {
+        if (!currentUser || !db) return;
+        try {
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'leaderboard', currentUser.uid);
+            await setDoc(docRef, {
+                username: playerName,
+                score: newScore,
+                lastUpdated: new Date().toISOString()
+            }, { merge: true });
+        } catch (err) {
+            console.error("Error syncing score", err);
+        }
+    }
+
+    window.promptName = function() {
+        const name = prompt("Choisis ton pseudo pour le classement :", playerName);
+        if (name && name.trim() !== "") {
+            playerName = name.trim();
+            localStorage.setItem('paneldex_username', playerName);
+            document.getElementById('playerNameDisplay').innerText = playerName;
+            syncScore(score);
+        }
+    };
+
+    // Image Handling
+    window.handleImage = function(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            const base64String = reader.result.split(',')[1];
+            analyzeImage(base64String);
+        };
+        reader.readAsDataURL(file);
+    }
+
+    // Gemini API Call
+    async function analyzeImage(base64Data) {
+        const apiKey = "AQ.Ab8RN6LIuIgAts3wKUGuyGiS4j7w9P0gs4hFYHKMTL6rB88HIw";
+        const resultSection = document.getElementById('resultSection');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        const scanResult = document.getElementById('scanResult');
+
+        resultSection.classList.remove('hidden');
+        loadingIndicator.classList.remove('hidden');
+        scanResult.classList.add('hidden');
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        
+        const promptText = `
+            Tu es un arbitre d'un jeu de collection de panneaux de signalisation.
+            Analyse cette image.
+            1. Est-ce qu'on y voit clairement un panneau de signalisation routière ?
+            2. Quel est le nom/type du panneau (ex: Stop, Limitation 50, Interdiction de stationner) ?
+            3. De quel pays semble-t-il provenir ?
+            4. Rareté : Commun (panneaux très fréquents), Rare (panneaux spécifiques ou animaux), Légendaire (très atypique).
+            5. Points : Si le pays est la France, donne 10 points. S'il s'agit d'un pays étranger, donne 50 points.
+            
+            RÉPONDS UNIQUEMENT AVEC UN OBJET JSON STRICT respectant ce format exact (sans balises markdown) :
+            {
+                "isSign": true,
+                "name": "Panneau Stop",
+                "country": "France",
+                "points": 10,
+                "rarity": "Commun"
+            }
+        `;
+
+        const payload = {
+            contents: [{
+                parts: [
+                    { text: promptText },
+                    { inlineData: { mimeType: "image/jpeg", data: base64Data } }
+                ]
+            }],
+            generationConfig: {
+                responseMimeType: "application/json"
             }
         };
 
-        // UI toggles
-        function toggleApiConfig() {
-            const content = document.getElementById('apiConfigContent');
-            const icon = document.getElementById('apiToggleIcon');
-            content.classList.toggle('hidden');
-            icon.classList.toggle('fa-chevron-up');
-            icon.classList.toggle('fa-chevron-down');
-        }
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
 
-        function saveApiKey() {
-            const key = document.getElementById('apiKeyInput').value;
-            localStorage.setItem('geminiApiKey', key);
-            alert("Clé sauvegardée ! Tu peux commencer à scanner.");
-            toggleApiConfig();
-        }
-
-        // Image Handling
-        function handleImage(event) {
-            const file = event.target.files[0];
-            if (!file) return;
-
-            const apiKey = localStorage.getItem('geminiApiKey');
-            if (!apiKey) {
-                alert("Erreur : Veuillez configurer votre clé API Gemini avant de scanner.");
-                document.getElementById('apiConfigContent').classList.remove('hidden');
-                return;
-            }
-
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                const base64String = reader.result.split(',')[1];
-                analyzeImage(base64String, apiKey);
-            };
-            reader.readAsDataURL(file);
-        }
-
-        // Gemini API Call
-        async function analyzeImage(base64Data, apiKey) {
-            const resultSection = document.getElementById('resultSection');
-            const loadingIndicator = document.getElementById('loadingIndicator');
-            const scanResult = document.getElementById('scanResult');
-
-            resultSection.classList.remove('hidden');
-            loadingIndicator.classList.remove('hidden');
-            scanResult.classList.add('hidden');
-
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+            const data = await response.json();
             
-            const promptText = `
-                Tu es un arbitre d'un jeu de collection de panneaux de signalisation.
-                Analyse cette image.
-                1. Est-ce qu'on y voit clairement un panneau de signalisation routière ?
-                2. Quel est le nom/type du panneau (ex: Stop, Limitation 50, Interdiction de stationner) ?
-                3. De quel pays semble-t-il provenir ?
-                4. Rareté : Commun (panneaux très fréquents), Rare (panneaux spécifiques ou animaux), Légendaire (très atypique).
-                5. Points : Si le pays est la France, donne 10 points. S'il s'agit d'un pays étranger, donne 50 points.
-                
-                RÉPONDS UNIQUEMENT AVEC UN OBJET JSON STRICT respectant ce format exact (sans balises markdown) :
-                {
-                    "isSign": true,
-                    "name": "Panneau Stop",
-                    "country": "France",
-                    "points": 10,
-                    "rarity": "Commun"
-                }
-            `;
+            if(data.error) throw new Error(data.error.message);
 
-            const payload = {
-                contents: [{
-                    parts: [
-                        { text: promptText },
-                        { inlineData: { mimeType: "image/jpeg", data: base64Data } }
-                    ]
-                }],
-                generationConfig: {
-                    responseMimeType: "application/json"
-                }
-            };
+            const jsonText = data.candidates[0].content.parts[0].text;
+            const signData = JSON.parse(jsonText);
 
-            try {
-                const response = await fetch(url, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                });
+            displayResult(signData);
 
-                const data = await response.json();
-                
-                if(data.error) throw new Error(data.error.message);
-
-                const jsonText = data.candidates[0].content.parts[0].text;
-                const signData = JSON.parse(jsonText);
-
-                displayResult(signData);
-
-            } catch (error) {
-                console.error("API Error:", error);
-                loadingIndicator.classList.add('hidden');
-                scanResult.classList.remove('hidden');
-                scanResult.innerHTML = `<p class="text-red-500 font-bold"><i class="fa-solid fa-circle-exclamation"></i> Erreur lors de l'analyse.</p><p class="text-sm mt-2">${error.message}</p><p class="text-xs text-gray-500 mt-2">Vérifie ta clé API.</p>`;
-            }
-        }
-
-        // Display Result & Update Pokedex
-        function displayResult(signData) {
-            const loadingIndicator = document.getElementById('loadingIndicator');
-            const scanResult = document.getElementById('scanResult');
-            
+        } catch (error) {
+            console.error("API Error:", error);
             loadingIndicator.classList.add('hidden');
             scanResult.classList.remove('hidden');
+            scanResult.innerHTML = `<p class="text-red-500 font-bold"><i class="fa-solid fa-circle-exclamation"></i> Erreur lors de l'analyse.</p><p class="text-sm mt-2">${error.message}</p><p class="text-xs text-gray-500 mt-2">Vérifie ta clé API, elle semble invalide ou expirée.</p>`;
+        }
+    }
 
-            if (signData.isSign) {
-                // Formatting rarity colors
-                let rarityColor = "bg-gray-200 text-gray-800";
-                if(signData.rarity === "Rare") rarityColor = "bg-blue-200 text-blue-800";
-                if(signData.rarity === "Légendaire") rarityColor = "bg-yellow-200 text-yellow-800";
+    // Display Result & Update Pokedex
+    function displayResult(signData) {
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        const scanResult = document.getElementById('scanResult');
+        
+        loadingIndicator.classList.add('hidden');
+        scanResult.classList.remove('hidden');
 
-                let bonusHtml = signData.country !== "France" ? `<span class="bg-purple-100 text-purple-800 text-xs font-bold px-2 py-1 rounded ml-2">Bonus Étranger!</span>` : "";
+        if (signData.isSign) {
+            // Formatting rarity colors
+            let rarityColor = "bg-gray-200 text-gray-800";
+            if(signData.rarity === "Rare") rarityColor = "bg-blue-200 text-blue-800";
+            if(signData.rarity === "Légendaire") rarityColor = "bg-yellow-200 text-yellow-800";
 
-                scanResult.innerHTML = `
-                    <div class="text-center mb-4">
-                        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 text-green-500 mb-2">
-                            <i class="fa-solid fa-check text-3xl"></i>
-                        </div>
-                        <h3 class="font-bold text-xl text-gray-800">Panneau capturé !</h3>
-                        <p class="text-3xl font-black text-blue-600 mt-2">+${signData.points} pts</p>
+            let bonusHtml = signData.country !== "France" ? `<span class="bg-purple-100 text-purple-800 text-xs font-bold px-2 py-1 rounded ml-2">Bonus Étranger!</span>` : "";
+
+            scanResult.innerHTML = `
+                <div class="text-center mb-4">
+                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-green-100 text-green-500 mb-2">
+                        <i class="fa-solid fa-check text-3xl"></i>
                     </div>
-                    <div class="bg-gray-50 rounded p-3 text-sm">
-                        <p class="mb-1"><span class="font-bold">Type:</span> ${signData.name}</p>
-                        <p class="mb-1"><span class="font-bold">Pays:</span> ${signData.country} ${bonusHtml}</p>
-                        <p><span class="font-bold">Rareté:</span> <span class="inline-block px-2 py-0.5 rounded text-xs font-bold ${rarityColor}">${signData.rarity}</span></p>
-                    </div>
-                `;
+                    <h3 class="font-bold text-xl text-gray-800">Panneau capturé !</h3>
+                    <p class="text-3xl font-black text-blue-600 mt-2">+${signData.points} pts</p>
+                </div>
+                <div class="bg-gray-50 rounded p-3 text-sm">
+                    <p class="mb-1"><span class="font-bold">Type:</span> ${signData.name}</p>
+                    <p class="mb-1"><span class="font-bold">Pays:</span> ${signData.country} ${bonusHtml}</p>
+                    <p><span class="font-bold">Rareté:</span> <span class="inline-block px-2 py-0.5 rounded text-xs font-bold ${rarityColor}">${signData.rarity}</span></p>
+                </div>
+            `;
 
-                // Add to pokedex and save
-                signData.date = new Date().toLocaleDateString('fr-FR');
-                pokedex.unshift(signData); // Add to beginning
-                localStorage.setItem('signPokedex', JSON.stringify(pokedex));
-                updateScoreAndPokedex();
+            // Add to pokedex and save
+            signData.date = new Date().toLocaleDateString('fr-FR');
+            pokedex.unshift(signData); // Add to beginning
+            localStorage.setItem('signPokedex', JSON.stringify(pokedex));
+            updateScoreAndPokedex();
 
-            } else {
-                scanResult.innerHTML = `
-                    <div class="text-center">
-                        <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-100 text-red-500 mb-2">
-                            <i class="fa-solid fa-xmark text-3xl"></i>
-                        </div>
-                        <h3 class="font-bold text-lg text-gray-800">Ceci n'est pas un panneau !</h3>
-                        <p class="text-sm text-gray-500 mt-2">L'IA n'a reconnu aucun panneau de signalisation sur cette photo. Rapproche-toi et essaie encore.</p>
+        } else {
+            scanResult.innerHTML = `
+                <div class="text-center">
+                    <div class="inline-flex items-center justify-center w-16 h-16 rounded-full bg-red-100 text-red-500 mb-2">
+                        <i class="fa-solid fa-xmark text-3xl"></i>
                     </div>
-                `;
-            }
+                    <h3 class="font-bold text-lg text-gray-800">Ceci n'est pas un panneau !</h3>
+                    <p class="text-sm text-gray-500 mt-2">L'IA n'a reconnu aucun panneau de signalisation sur cette photo. Rapproche-toi et essaie encore.</p>
+                </div>
+            `;
+        }
+    }
+
+    // Render Pokedex
+    function updateScoreAndPokedex() {
+        // Update Score
+        score = pokedex.reduce((acc, curr) => acc + curr.points, 0);
+        document.getElementById('totalScore').innerHTML = `${score} <span class="text-sm">pts</span>`;
+        document.getElementById('pokedexCount').innerText = pokedex.length;
+
+        // Sync to cloud
+        syncScore(score);
+
+        // Render Grid
+        const grid = document.getElementById('pokedexGrid');
+        grid.innerHTML = '';
+
+        if (pokedex.length === 0) {
+            grid.innerHTML = `<p class="col-span-2 text-center text-gray-400 text-sm py-8">Ton Pokédex est vide. Scanne ton premier panneau !</p>`;
+            return;
         }
 
-        // Render Pokedex
-        function updateScoreAndPokedex() {
-            // Update Score
-            score = pokedex.reduce((acc, curr) => acc + curr.points, 0);
-            document.getElementById('totalScore').innerHTML = `${score} <span class="text-sm">pts</span>`;
-            document.getElementById('pokedexCount').innerText = pokedex.length;
+        pokedex.forEach((sign) => {
+            let rarityColor = "border-gray-200 bg-white";
+            if(sign.rarity === "Rare") rarityColor = "border-blue-300 bg-blue-50";
+            if(sign.rarity === "Légendaire") rarityColor = "border-yellow-400 bg-yellow-50";
 
-            // Render Grid
-            const grid = document.getElementById('pokedexGrid');
-            grid.innerHTML = '';
+            const card = document.createElement('div');
+            card.className = `pokedex-card rounded-xl border-2 ${rarityColor} p-3 shadow-sm relative overflow-hidden`;
+            
+            const countryFlag = sign.country === "France" ? "🇫🇷" : "🌍";
 
-            if (pokedex.length === 0) {
-                grid.innerHTML = `<p class="col-span-2 text-center text-gray-400 text-sm py-8">Ton Pokédex est vide. Scanne ton premier panneau !</p>`;
-                return;
-            }
-
-            pokedex.forEach((sign) => {
-                let rarityColor = "border-gray-200 bg-white";
-                if(sign.rarity === "Rare") rarityColor = "border-blue-300 bg-blue-50";
-                if(sign.rarity === "Légendaire") rarityColor = "border-yellow-400 bg-yellow-50";
-
-                const card = document.createElement('div');
-                card.className = `pokedex-card rounded-xl border-2 ${rarityColor} p-3 shadow-sm relative overflow-hidden`;
-                
-                const countryFlag = sign.country === "France" ? "🇫🇷" : "🌍";
-
-                card.innerHTML = `
-                    <div class="absolute -right-2 -top-2 bg-blue-500 text-white font-bold text-xs px-3 py-3 rounded-bl-full w-10 h-10 flex items-center justify-center">
-                        ${sign.points}
-                    </div>
-                    <div class="text-2xl mb-1">${countryFlag}</div>
-                    <h4 class="font-bold text-sm text-gray-800 leading-tight mb-1 truncate" title="${sign.name}">${sign.name}</h4>
-                    <p class="text-xs text-gray-500">${sign.date} • ${sign.rarity}</p>
-                `;
-                grid.appendChild(card);
-            });
-        }
-    </script>
+            card.innerHTML = `
+                <div class="absolute -right-2 -top-2 bg-blue-500 text-white font-bold text-xs px-3 py-3 rounded-bl-full w-10 h-10 flex items-center justify-center">
+                    ${sign.points}
+                </div>
+                <div class="text-2xl mb-1">${countryFlag}</div>
+                <h4 class="font-bold text-sm text-gray-800 leading-tight mb-1 truncate" title="${sign.name}">${sign.name}</h4>
+                <p class="text-xs text-gray-500">${sign.date} • ${sign.rarity}</p>
+            `;
+            grid.appendChild(card);
+        });
+    }
+</script>
 </body>
 </html>
